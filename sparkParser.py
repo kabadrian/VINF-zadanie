@@ -8,6 +8,7 @@ from datetime import datetime
 # spark-submit sparkParser.py -i <input_file_path> -o <output_file_path> -m <cluster_master> -s <spark_path_cluster>
 
 def main(argv):
+    # Regex for all fields we need to filter related to books
     book_regex = "^book\.book$"
     book_editions_regex = "^book\.book\.editions$"
     book_edition_regex = "book\.book_edition"
@@ -27,6 +28,7 @@ def main(argv):
     master = 'local[*]'
     spark_url = None
 
+    # Create spark session with provided arguments
     try:
         opts, args = getopt.getopt(argv, "hi:o:m:s", ["ifile=", "ofile=", "master=", "spark="])
     except getopt.GetoptError:
@@ -75,7 +77,7 @@ def main(argv):
     book_editions_id_df.createOrReplaceTempView("book_editions_id")
     book_edition_columns_df.createOrReplaceTempView("book_editions_columns")
 
-
+    # Create dataframe by joining filtered data from previous step by id
     books_editions_dataframe = spark.sql("""
         SELECT book_editions_id.subject, book_editions_columns.predicate, book_editions_columns.object
         from book_editions_id
@@ -87,9 +89,11 @@ def main(argv):
     current_time = now.strftime("%H:%M:%S")
     print("Book editions dataframe: ", current_time)
 
+    # Group book editions by subject and predicate, make a list from values, as multiple values can be present for each key
     books_editions_dataframe.show(truncate=False)
     book_editions_grouped = books_editions_dataframe.groupBy(['subject', 'predicate']).agg(collect_list('object').alias('object'))
 
+    # Create rdd from book editions dataframe, call groupByKey and map so we get data in python dict format
     book_editions_rdd = book_editions_grouped.rdd
     book_editions_rdd = book_editions_rdd.map(lambda x: (x[0], (x[1], x[2])))
     book_editions_rdd = book_editions_rdd.groupByKey().map(lambda x: (x[0], { '\''+str(name)+'\'' + ':' + str(value) for name, value in list(x[1])}))
@@ -97,18 +101,17 @@ def main(argv):
     now = datetime.now()
     current_time = now.strftime("%H:%M:%S")
     print("Book editions groupby: ", current_time)
-    #
+
+    # schema for python dict dataframe in pyspark
     schema_id = StructType([
         StructField("id", StringType(), False),
         StructField("properties", StringType(), True)
       ])
 
     book_editions_df = book_editions_rdd.toDF(schema_id)
-
-    # book_editions_df = spark.createDataFrame(data=book_editions_dictionary, schema = schema_id)
     book_editions_df.createOrReplaceTempView("book_editions_json")
 
-    # authors, genres
+    # Filter columns related to authors and genres
 
     author_columns = all_rdd.filter(lambda x: (re.search(name_regex, x[1]) and re.search(en_string, x[2])))
     author_genres_ids_rdd = all_rdd.filter(lambda x: re.search(book_author, x[2]) or re.search(book_genre_regex, x[2]))
@@ -118,6 +121,7 @@ def main(argv):
     author_df.createOrReplaceTempView("AUTHOR_COLUMNS")
     author_genres_book_df.createOrReplaceTempView("AUTHOR_DATA")
 
+    # create dataframe of authors and genres from previously filtered data
     author_dataframe = spark.sql("""
         SELECT AUTHOR_DATA.subject, AUTHOR_COLUMNS.predicate, AUTHOR_COLUMNS.object
         from AUTHOR_DATA
@@ -132,7 +136,7 @@ def main(argv):
     current_time = now.strftime("%H:%M:%S")
     print("Authors group by ended: ", current_time)
 
-    # book
+    # filter book related data
 
     book_ids_rdd = all_rdd.filter(lambda x: re.search(book_regex, x[2]))
     book_columns = all_rdd.filter(lambda x: re.search(book_editions_regex, x[1]) or re.search(book_author_regex, x[1]) or re.search(book_genre_regex, x[1]) or (re.search(name_regex, x[1]) and re.search(en_string, x[2])) or re.search(year_of_publication, x[1]) or (re.search(description_regex, x[1]) and re.search(en_string, x[2])))
@@ -142,6 +146,7 @@ def main(argv):
     book_df.createOrReplaceTempView("BOOK_COLUMNS")
     book_id_df.createOrReplaceTempView("BOOK_ID")
 
+    # Get all book related columns and create dataframe from them
     books_dataframe = spark.sql("""
         SELECT BOOK_ID.subject, BOOK_COLUMNS.predicate, BOOK_COLUMNS.object
         from BOOK_ID
@@ -149,6 +154,7 @@ def main(argv):
         ORDER BY BOOK_ID.subject
     """)
 
+    # Join references to other records by id
     books_dataframe.createOrReplaceTempView("BOOK_DATA")
     books_dataframe = spark.sql("""
         SELECT BOOK_DATA.subject, BOOK_DATA.predicate, 
@@ -167,15 +173,18 @@ def main(argv):
     current_time = now.strftime("%H:%M:%S")
     print("books group by started: ", current_time)
 
+    # group books by subject and predicate, in case of multiple values for one key, like authors of book
     books_grouped = books_dataframe.groupBy(['subject', 'predicate']).agg(collect_list('object').alias('object'))
     grouped_rdd = books_grouped.rdd
     grouped_rdd = grouped_rdd.map(lambda x: (x[0], (x[1], x[2])))
+    # group by id and map to python dict style values
     grouped_rdd = grouped_rdd.groupByKey().map(lambda x: {x[0]: {name: value for name, value in list(x[1])}})
 
     now = datetime.now()
     current_time = now.strftime("%H:%M:%S")
     print("books group by ended: ", current_time)
 
+    # save python dict to multiple outputs file
     grouped_rdd.saveAsTextFile(output_file)
 
 
